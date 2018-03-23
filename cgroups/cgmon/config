@@ -1,0 +1,22 @@
+{
+    "workdir": "/root/wd",
+    "resources": ["monitor", "cpu"],
+    "policies": {
+        "cpu": {"name": "external",
+                "executable": "/root/cgroups/cpu_policy.py"
+               }
+    },
+    "limit": {
+        "monitor": {"name": "external",
+                "executable": "/root/cgroups/cpu_limit.py"
+               },
+        "cpu": {"name": "external",
+                "executable": "/root/cgroups/cpu_limit.py"
+               }
+    },
+    "limits": {
+        "min100" : "--cpu 100",
+        "min500" : "--cpu 500",
+        "min1000" : "--cpu 1000"
+    }
+}
