@@ -1,0 +1,1 @@
+cmd_/root/host/lunix/lunix.ko := ld -r -m elf_x86_64 -T /usr/src/linux-headers-4.9.0-0.bpo.6-common/scripts/module-common.lds --build-id  -o /root/host/lunix/lunix.ko /root/host/lunix/lunix.o /root/host/lunix/lunix.mod.o ;  true
