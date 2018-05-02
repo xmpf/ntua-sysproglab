@@ -1,10 +1,10 @@
 #!/bin/bash
 
-group="root"
+group="kvm"
 mode="664"
 
 # if `kvm` not a valid group, default is `wheel`
-grep -q '^root:' /etc/group || group="wheel"
+grep -q '^kvm:' /etc/group || group="wheel"
 
 # Make sure the node for the first serial port is there.
 mknod /dev/ttyS0 c 4 64

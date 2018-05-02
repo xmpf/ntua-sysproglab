@@ -36,7 +36,6 @@
  * Global data
  */
 
-long *lkpTables[] = { lookup_voltage, lookup_temperature, lookup_light };
 
 /* character device */
 struct cdev lunix_chrdev_cdev;		/* linux/cdev.h */
@@ -84,10 +83,13 @@ static int lunix_chrdev_state_needs_refresh(struct lunix_chrdev_state_struct *st
  */
 static int lunix_chrdev_state_update(struct lunix_chrdev_state_struct *state)
 {
-	int ret;
-
+	int ret; /* return value */
+	
+	long *lkpTables[] = { lookup_voltage, lookup_temperature, lookup_light };
+	
 	struct lunix_sensor_struct *sensor;
-	unsigned long flags;
+	unsigned long flags; 
+		
 	int updated;
 
 	uint32_t _data;
@@ -104,6 +106,8 @@ static int lunix_chrdev_state_update(struct lunix_chrdev_state_struct *state)
 	 * Grab the raw data quickly, hold the
 	 * spinlock for as little as possible.
 	 */
+
+	WARN_ON (!(sensor = state->sensor));
 
 	/* ? =>> What should we use?
 	 * down_interruptible ?
@@ -151,7 +155,7 @@ static int lunix_chrdev_state_update(struct lunix_chrdev_state_struct *state)
 
 				/* give floating point representation */
 				snprintf(state->buf_data, LUNIX_CHRDEV_BUFSZ, "%c%ld.%ld\n", sign, dec, frac);
-				state->buf_lim = strnlen(state->buf_data, LUNIX_CHRDEV_BUFSZ);
+				state->buf_lim = strnlen(state->buf_data, LUNIX_CHRDEV_BUFSZ) + 1;
 
 				/* ensure null terminated strings */
 				state->buf_data[state->buf_lim] = '\0';
@@ -207,7 +211,7 @@ static int lunix_chrdev_open(struct inode *inode, struct file *filp)
 	dev_t _minor_ = iminor(inode);
 
 	/* device type */
-	int type = _minor_ & 0xf;
+	int type = _minor_ & 0xf;   /* Battery, Temperature or Light measurement */
 
 	/* lookup tables */
 
@@ -229,19 +233,20 @@ static int lunix_chrdev_open(struct inode *inode, struct file *filp)
 	 */
 
 	/* Allocate a new Lunix character device private state structure *
-	 * * Consider using vmalloc()
+	 * Consider using vmalloc()
+	 * state: device information
 	 */
-	state = kmalloc(sizeof(struct lunix_chrdev_state_struct), GFP_KERNEL);
-	if (!state) {
+	state = (struct lunix_chrdev_state_struct *)kmalloc(sizeof(struct lunix_chrdev_state_struct), GFP_KERNEL);
+	if (state == NULL) {
 		debug("[var:state] =>> allocation failed");
 		ret = -ENOMEM;
 		goto out;
 	}
 
-
-	state->type = type;
+    /* parse info into state struct */
+	state->type = type; // type of measurement
 	state->sensor = &lunix_sensors[_minor_ >> 3];
-	state->buf_lim = /*?*/0;
+	state->buf_lim = 1; /* ? */
 
 	/* process raw data =>> COOKED */
 	state->mode = COOKED;
@@ -250,7 +255,24 @@ static int lunix_chrdev_open(struct inode *inode, struct file *filp)
 	sema_init(&state->lock, 1);
 
 	/* preserve state information across syscalls =>> needs to be freed */
-	filp->private_data = (void *)state;
+	filp->private_data = (struct lunix_chrdev_state_struct *)state;
+
+
+	/***
+	struct file {
+      mode_t f_mode;
+      loff_t f_pos;
+      unsigned short f_flags;
+      unsigned short f_count;
+      unsigned long f_reada, f_ramax, f_raend, f_ralen, f_rawin;
+      struct file *f_next, *f_prev;
+      int f_owner;         // pid or -pgrp where SIGIO should be sent
+      struct inode * f_inode;
+      struct file_operations * f_op;
+      unsigned long f_version;
+      void *private_data;  // needed for tty driver, and maybe others
+    };
+	***/
 
 out:
 
@@ -294,7 +316,7 @@ static ssize_t lunix_chrdev_read(struct file *filp, char __user *usrbuf, size_t 
 	struct lunix_chrdev_state_struct *state;
 
 	// restore =>> filp->private_data = state [`state` from open()]
-	state = filp->private_data;
+	state = (struct lunix_chrdev_state_struct *)filp->private_data;
 	WARN_ON(!state);
 
 	sensor = state->sensor;
@@ -303,9 +325,11 @@ static ssize_t lunix_chrdev_read(struct file *filp, char __user *usrbuf, size_t 
 	debug("entering read()\n");
 
 	/* Lock? */
-	if (    /* !(mutex_is_locked(&state->lock)) && */
-		/* mutex_lock_interruptible(&sensor->lock) */
-		down_interruptible(&state->lock)) { /* if not locked, try acquire the lock */
+	/* !(mutex_is_locked(&state->lock)) && */
+    /* mutex_lock_interruptible(&sensor->lock) */
+
+    /* state->lock : semaphore - actions: up() / down() */
+	if (down_interruptible(&state->lock)) { /* if not locked, try acquire the lock */
 		
 		/* mutex_lock_interruptible(struct mutex *lock):
 		   Lock the mutex like mutex_lock, and return 0 if the mutex has been acquired 
@@ -313,10 +337,12 @@ static ssize_t lunix_chrdev_read(struct file *filp, char __user *usrbuf, size_t 
 		   If a signal arrives while waiting for the lock then this function returns -EINTR. 
 		*/		
 
+        debug("Couldn't acquire lock [read]\n");
 		ret = -EINTR; /* if lock() interrupted */
 		goto out;   /* unable to lock the mutex */
 	}
 
+    // TODO
 	/*
 	 * If the cached character device state needs to be
 	 * updated by actual sensor data (i.e. we need to report
@@ -324,7 +350,9 @@ static ssize_t lunix_chrdev_read(struct file *filp, char __user *usrbuf, size_t 
 	 */
 	if (*f_pos == 0) {  /* we are at the beginning position */
 		while (lunix_chrdev_state_update(state) == -EAGAIN) {
-			mutex_unlock(&state->lock);
+
+			/* mutex_unlock(&state->lock); */
+			up(&state->lock);
 
 			/* The process needs to sleep =>> semaphore lock */
 			/* See LDD3, page 153 for a hint */
@@ -342,9 +370,14 @@ static ssize_t lunix_chrdev_read(struct file *filp, char __user *usrbuf, size_t 
 				goto out;
 			}
 
-			/* make sure mutex is unlocked before trying to acquire */
+			/* make sure mutex is unlocked before trying to acquire
 			if (!mutex_is_locked(&sensor->lock) && mutex_lock_interruptible(&sensor->lock)) {
 
+			}
+			*/
+			if (down_interruptible(&state->lock)) {
+				ret = -ERESTARTSYS;
+				goto out;
 			}
 		}
 	}
@@ -359,10 +392,9 @@ static ssize_t lunix_chrdev_read(struct file *filp, char __user *usrbuf, size_t 
 	}
 
 	/* Determine the number of cached bytes to copy to userspace */
-
 	rfsize = (*f_pos + cnt >= state->buf_lim) ? state->buf_lim - *f_pos : cnt;
 
-	/* Returns number of bytes that could not be copied.
+	/* copy_to_user: Returns number of bytes that could not be copied.
 	 * On success, this will be zero.
 	 */
 	if ((remaining_data = copy_to_user(usrbuf, state->buf_data + *f_pos, rfsize)) != 0) { // partial copy
@@ -386,9 +418,13 @@ static ssize_t lunix_chrdev_read(struct file *filp, char __user *usrbuf, size_t 
 	}
 
 unlock: /* Unlock? */
-	if (mutex_is_locked(&sensor->lock)) { /* make sure mutex is locked before trying to unlock */
-		mutex_unlock(&sensor->lock);
-	}
+    /* make sure mutex is locked before trying to unlock */
+    /* mutex_is_locked(&sensor->lock) */
+    /* mutex_unlock(&sensor->lock); */
+    // sem_getvalue(&state->lock, &sem_val);
+	// if (sem_val == 0) { // indicates that lock is acquired =>> we need to release the lock
+    up(&state->lock);
+	// }
 out:
 	return ret;
 }
